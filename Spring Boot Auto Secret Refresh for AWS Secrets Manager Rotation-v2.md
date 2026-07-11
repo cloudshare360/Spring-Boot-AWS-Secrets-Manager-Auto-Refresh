@@ -41,6 +41,20 @@ v2 additional improvements:
 - PostgreSQL: trigger refresh on SQL auth failure (`SQLSTATE 28P01`) and retry once.
 - OpenSearch: trigger refresh on `401/403` and retry once.
 
+### 1.1 Independent rotation handling (critical)
+
+- PostgreSQL and OpenSearch must refresh independently.
+- Never invoke a shared "refresh both" operation from either failure path.
+- PostgreSQL failures must call only PostgreSQL refresh logic.
+- OpenSearch failures must call only OpenSearch refresh logic.
+
+Independent trigger mapping:
+
+| Failure signal | Refresh action | Retry scope |
+| --- | --- | --- |
+| PostgreSQL `SQLSTATE 28P01` | Refresh PostgreSQL secret + Hikari credentials only | Retry PostgreSQL connection once |
+| OpenSearch `401` or `403` | Refresh OpenSearch secret + OpenSearch client only | Retry OpenSearch request once |
+
 ### 2. Secret read strategy
 
 - Read with `versionStage("AWSCURRENT")`.
@@ -121,6 +135,38 @@ public synchronized void refreshCredentials() {
     dataSource.setUsername(secret.getUsername());
     dataSource.setPassword(secret.getPassword());
     dataSource.getHikariPoolMXBean().softEvictConnections();
+}
+```
+
+### Independent failure handlers
+
+```java
+// PostgreSQL path: refresh PostgreSQL only
+public Connection getConnection() throws SQLException {
+    try {
+        return dataSource.getConnection();
+    } catch (SQLException ex) {
+        if ("28P01".equals(ex.getSQLState())) {
+            postgresRefreshService.refreshCredentials();
+            return dataSource.getConnection();
+        }
+        throw ex;
+    }
+}
+```
+
+```java
+// OpenSearch path: refresh OpenSearch only
+public SearchResponse<MyDocument> search(SearchRequest request) throws IOException {
+    try {
+        return openSearchClientProvider.getClient().search(request, MyDocument.class);
+    } catch (OpenSearchException ex) {
+        if (ex.status() == 401 || ex.status() == 403) {
+            openSearchClientProvider.refreshClient();
+            return openSearchClientProvider.getClient().search(request, MyDocument.class);
+        }
+        throw ex;
+    }
 }
 ```
 

@@ -66,7 +66,7 @@ public class PostgresSecretRefreshService {
 
     private final HikariDataSource dataSource;
     private final SecretsManagerClient secretsClient;
-        private final ObjectMapper objectMapper = new ObjectMapper()
+    private final ObjectMapper objectMapper = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
     public PostgresSecretRefreshService(
@@ -236,7 +236,7 @@ import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueReques
 public class OpenSearchClientProvider {
 
     private final SecretsManagerClient secretsClient;
-        private final ObjectMapper objectMapper = new ObjectMapper()
+    private final ObjectMapper objectMapper = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
     private volatile OpenSearchClient client;
@@ -361,6 +361,17 @@ Request works without restart
 ---
 
 ## Important Rules
+
+### Refresh PostgreSQL and OpenSearch independently
+
+- Do not create a shared refresh method that refreshes both systems together.
+- PostgreSQL authentication failure should trigger only PostgreSQL credential refresh.
+- OpenSearch authentication failure should trigger only OpenSearch client refresh.
+
+| Failure signal | Refresh action | Retry scope |
+| --- | --- | --- |
+| PostgreSQL `SQLSTATE 28P01` | Refresh PostgreSQL secret and Hikari credentials only | Retry PostgreSQL connection once |
+| OpenSearch `401` or `403` | Refresh OpenSearch secret and OpenSearch client only | Retry OpenSearch request once |
 
 ### Ignore extra secret properties
 
