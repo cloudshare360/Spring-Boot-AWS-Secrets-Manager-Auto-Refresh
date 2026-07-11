@@ -1,25 +1,45 @@
- — Legacy Style
-Goal
-When AWS Secrets Manager rotates passwords for PostgreSQL RDS or OpenSearch, the Spring Boot application should automatically fetch the new secret and continue working without restarting the container.
+# Spring Boot AWS Secrets Manager Auto Refresh - Legacy Style (Ignore Extra Secret Properties)
 
-This version avoids:
+## Goal
 
-java.util.function.Supplier
-Part 1: PostgreSQL RDS
-Step 1: Secret format in AWS Secrets Manager
+When AWS Secrets Manager rotates passwords for PostgreSQL RDS or OpenSearch, the Spring Boot application should fetch the latest secret and continue working without restarting the container.
+
+This version also ignores extra JSON fields in Secrets Manager that are not used for RDS or OpenSearch connections.
+
+This legacy style avoids using `java.util.function.Supplier`.
+
+---
+
+## Part 1: PostgreSQL RDS
+
+### Step 1: Secret format in AWS Secrets Manager
+
 Secret name:
 
+```text
 prod/postgres/app
+```
+
 Secret value:
 
+```json
 {
-  "host": "your-rds-endpoint.amazonaws.com",
-  "port": 5432,
-  "dbname": "appdb",
-  "username": "app_user",
-  "password": "current-password"
+    "host": "your-rds-endpoint.amazonaws.com",
+    "port": 5432,
+    "dbname": "appdb",
+    "username": "app_user",
+    "password": "current-password",
+    "rotation_note": "safe to ignore",
+    "owner_email": "dba@example.com"
 }
-Step 2: Create Java model
+```
+
+### Step 2: Create Java model
+
+```java
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class PostgresSecret {
     private String host;
     private int port;
@@ -29,7 +49,12 @@ public class PostgresSecret {
 
     // getters and setters
 }
-Step 3: Create refresh service
+```
+
+### Step 3: Create refresh service
+
+```java
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariDataSource;
 import org.springframework.stereotype.Service;
@@ -41,7 +66,8 @@ public class PostgresSecretRefreshService {
 
     private final HikariDataSource dataSource;
     private final SecretsManagerClient secretsClient;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+        private final ObjectMapper objectMapper = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
     public PostgresSecretRefreshService(
             HikariDataSource dataSource,
@@ -59,8 +85,7 @@ public class PostgresSecretRefreshService {
                             .build()
             ).secretString();
 
-            PostgresSecret secret =
-                    objectMapper.readValue(secretJson, PostgresSecret.class);
+            PostgresSecret secret = objectMapper.readValue(secretJson, PostgresSecret.class);
 
             dataSource.setUsername(secret.getUsername());
             dataSource.setPassword(secret.getPassword());
@@ -75,7 +100,11 @@ public class PostgresSecretRefreshService {
         }
     }
 }
-Step 4: Create legacy connection provider
+```
+
+### Step 4: Create legacy connection provider
+
+```java
 import org.springframework.stereotype.Component;
 
 import javax.sql.DataSource;
@@ -102,8 +131,6 @@ public class RefreshableConnectionProvider {
         } catch (SQLException ex) {
             if (isPostgresAuthFailure(ex)) {
                 refreshService.refreshCredentials();
-
-                // Retry once after refreshing secret
                 return dataSource.getConnection();
             }
 
@@ -115,46 +142,69 @@ public class RefreshableConnectionProvider {
         return "28P01".equals(ex.getSQLState());
     }
 }
-Step 5: Replace existing JDBC code
+```
+
+### Step 5: Replace existing JDBC code
+
 Before:
 
+```java
 try (Connection conn = dataSource.getConnection()) {
     // existing JDBC logic
 }
+```
+
 After:
 
+```java
 try (Connection conn = refreshableConnectionProvider.getConnection()) {
     // existing JDBC logic
 }
-PostgreSQL flow
+```
+
+### PostgreSQL flow
+
+```text
 Application calls getConnection()
-↓
 Old password fails
-↓
 PostgreSQL returns SQLSTATE 28P01
-↓
 Application fetches new secret from AWS Secrets Manager
-↓
 Application updates Hikari username/password
-↓
 Application evicts old pool connections
-↓
 Application retries getConnection()
-↓
 Connection works without restart
-Part 2: OpenSearch
-Step 1: Secret format in AWS Secrets Manager
+```
+
+---
+
+## Part 2: OpenSearch
+
+### Step 1: Secret format in AWS Secrets Manager
+
 Secret name:
 
+```text
 prod/opensearch/app
+```
+
 Secret value:
 
+```json
 {
-  "host": "https://your-opensearch-domain.us-east-1.es.amazonaws.com",
-  "username": "admin",
-  "password": "current-password"
+    "host": "https://your-opensearch-domain.us-east-1.es.amazonaws.com",
+    "username": "admin",
+    "password": "current-password",
+    "team": "search-platform",
+    "expires_hint": "2026-12-31"
 }
-Step 2: Create Java model
+```
+
+### Step 2: Create Java model
+
+```java
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class OpenSearchSecret {
     private String host;
     private String username;
@@ -162,7 +212,12 @@ public class OpenSearchSecret {
 
     // getters and setters
 }
-Step 3: Create refreshable OpenSearch client provider
+```
+
+### Step 3: Create refreshable OpenSearch client provider
+
+```java
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.hc.client5.http.auth.AuthScope;
 import org.apache.hc.client5.http.auth.UsernamePasswordCredentials;
@@ -181,7 +236,8 @@ import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueReques
 public class OpenSearchClientProvider {
 
     private final SecretsManagerClient secretsClient;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+        private final ObjectMapper objectMapper = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
     private volatile OpenSearchClient client;
 
@@ -206,12 +262,9 @@ public class OpenSearchClientProvider {
                             .build()
             ).secretString();
 
-            OpenSearchSecret secret =
-                    objectMapper.readValue(secretJson, OpenSearchSecret.class);
+            OpenSearchSecret secret = objectMapper.readValue(secretJson, OpenSearchSecret.class);
 
-            BasicCredentialsProvider credentialsProvider =
-                    new BasicCredentialsProvider();
-
+            BasicCredentialsProvider credentialsProvider = new BasicCredentialsProvider();
             credentialsProvider.setCredentials(
                     AuthScope.ANY,
                     new UsernamePasswordCredentials(
@@ -241,10 +294,11 @@ public class OpenSearchClientProvider {
         }
     }
 }
-Step 4: Create legacy OpenSearch service method
-Example for search operation:
+```
 
-import org.opensearch.client.opensearch.OpenSearchClient;
+### Step 4: Create legacy OpenSearch service method
+
+```java
 import org.opensearch.client.opensearch._types.OpenSearchException;
 import org.opensearch.client.opensearch.core.SearchRequest;
 import org.opensearch.client.opensearch.core.SearchResponse;
@@ -267,8 +321,6 @@ public class OpenSearchSearchService {
         } catch (OpenSearchException ex) {
             if (ex.status() == 401 || ex.status() == 403) {
                 clientProvider.refreshClient();
-
-                // Retry once after refreshing client
                 return clientProvider.getClient().search(request, MyDocument.class);
             }
 
@@ -276,61 +328,111 @@ public class OpenSearchSearchService {
         }
     }
 }
-Step 5: Replace existing OpenSearch usage
+```
+
+### Step 5: Replace existing OpenSearch usage
+
 Before:
 
+```java
 SearchResponse<MyDocument> response =
         openSearchClient.search(request, MyDocument.class);
+```
+
 After:
 
+```java
 SearchResponse<MyDocument> response =
         openSearchSearchService.search(request);
-OpenSearch flow
+```
+
+### OpenSearch flow
+
+```text
 Application calls OpenSearch
-↓
 Old password fails
-↓
 OpenSearch returns 401 or 403
-↓
 Application fetches new secret from AWS Secrets Manager
-↓
 Application rebuilds OpenSearch client
-↓
 Application retries request once
-↓
 Request works without restart
-Important Rules
-Retry only once
+```
+
+---
+
+## Important Rules
+
+### Ignore extra secret properties
+
+If the secret contains extra keys that your connection code does not use, deserialization should still succeed.
+
+Use one or both safeguards:
+
+- Annotate models with `@JsonIgnoreProperties(ignoreUnknown = true)`.
+- Configure `ObjectMapper` with `FAIL_ON_UNKNOWN_PROPERTIES = false`.
+
+This keeps refresh logic resilient when secret payloads evolve with metadata fields.
+
+### Retry only once
+
 Do not retry forever.
 
 Good:
 
-try → fail → refresh secret → retry once
+```text
+try -> fail -> refresh secret -> retry once
+```
+
 Bad:
 
-while true → retry forever
-Make refresh methods synchronized
+```text
+while true -> retry forever
+```
+
+### Make refresh methods synchronized
+
 This avoids multiple threads refreshing at the same time.
 
+```java
 public synchronized void refreshCredentials() {
     // refresh logic
 }
+
 public synchronized void refreshClient() {
     // refresh logic
 }
-Final Summary
-PostgreSQL
+```
+
+---
+
+## Final Summary
+
+### PostgreSQL
+
 Replace this:
 
+```java
 dataSource.getConnection()
+```
+
 With this:
 
+```java
 refreshableConnectionProvider.getConnection()
-OpenSearch
+```
+
+### OpenSearch
+
 Replace direct client usage:
 
+```java
 openSearchClient.search(...)
+```
+
 With a service method:
 
+```java
 openSearchSearchService.search(...)
+```
+
 This allows the application to fetch rotated AWS Secrets Manager credentials and continue working without restarting the Spring Boot container.
