@@ -1,0 +1,1 @@
+# Spring-Boot-AWS-Secrets-Manager-Auto-Refresh
